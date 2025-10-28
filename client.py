@@ -1,5 +1,5 @@
 """
-LAN Lords Client
+LAN Lords Client - Fixed Version
 Handles player input, rendering, and network communication with server
 """
 
@@ -19,8 +19,8 @@ from config import (
 pygame.init()
 
 # Constants
-WINDOW_WIDTH = 1000
-WINDOW_HEIGHT = 700
+WINDOW_WIDTH = 1200
+WINDOW_HEIGHT = 800
 FPS = 60
 
 class GameClient:
@@ -101,7 +101,6 @@ class GameClient:
                 while '\n' in buffer:
                     line, buffer = buffer.split('\n', 1)
                     if line:
-                        # Debug: print first 60 chars of message
                         self.handle_message(line)
             except Exception as e:
                 print(f"Error receiving message: {e}")
@@ -122,7 +121,10 @@ class GameClient:
                         self.players[player_data["id"]] = player_data
                     
                     # Update chat
-                    self.chat_messages = message.data.get("chat", [])
+                    new_chat = message.data.get("chat", [])
+                    if len(new_chat) != len(self.chat_messages):
+                        print(f"Chat updated: {len(new_chat)} messages")
+                    self.chat_messages = new_chat
                     self.received_first_state = True
             
             elif message.type == MessageType.PLAYER_JOINED:
@@ -133,16 +135,6 @@ class GameClient:
                         print(f"✅ Your ID is {self.player_id}")
                 else:
                     print(f"✅ Player joined: {message.data.get('name')}")
-            
-            if message.type == MessageType.GAME_STATE:
-                with self.lock:
-                    # Update player data
-                    for player_data in message.data.get("players", []):
-                        self.players[player_data["id"]] = player_data
-                    
-                    # Update chat
-                    self.chat_messages = message.data.get("chat", [])
-                    self.received_first_state = True
             
             elif message.type == MessageType.PLAYER_LEFT:
                 player_id = message.data.get("player_id")
@@ -164,9 +156,10 @@ class GameClient:
         })
         
         try:
-            self.socket.sendall(message.to_json().encode('utf-8') + b'\n')
-        except:
-            pass
+            payload = message.to_json().encode('utf-8') + b'\n'
+            self.socket.sendall(payload)
+        except Exception as e:
+            print(f"Failed to send input: {e}")
     
     def send_attack(self, direction: Direction):
         """Send attack to server"""
@@ -202,15 +195,18 @@ class GameClient:
         })
         
         try:
-            self.socket.sendall(message.to_json().encode('utf-8') + b'\n')
-        except:
-            pass
+            payload = message.to_json().encode('utf-8') + b'\n'
+            self.socket.sendall(payload)
+            print(f"Sent chat message: {text}")
+        except Exception as e:
+            print(f"Failed to send chat: {e}")
     
     def run(self):
         """Main game loop"""
-        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT))
-        pygame.display.set_caption("LAN Lords")
+        self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
+        pygame.display.set_caption("LAN Lords - Press F11 for fullscreen")
         self.clock = pygame.time.Clock()
+        self.fullscreen = False
         
         self.running = True
         
@@ -267,9 +263,10 @@ class GameClient:
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     mx, my = pygame.mouse.get_pos()
                     # Determine UI element bounds
-                    name_rect = pygame.Rect(WINDOW_WIDTH//2 - 150, 260, 300, 36)
-                    ip_rect = pygame.Rect(WINDOW_WIDTH//2 - 150, 320, 300, 36)
-                    btn_rect = pygame.Rect(WINDOW_WIDTH//2 - 80, 380, 160, 44)
+                    screen_width = self.screen.get_width()
+                    name_rect = pygame.Rect(screen_width//2 - 150, 260, 300, 36)
+                    ip_rect = pygame.Rect(screen_width//2 - 150, 320, 300, 36)
+                    btn_rect = pygame.Rect(screen_width//2 - 80, 380, 160, 44)
                     if name_rect.collidepoint(mx, my):
                         self.menu_focus = "name"
                     elif ip_rect.collidepoint(mx, my):
@@ -279,32 +276,33 @@ class GameClient:
                         self.try_connect_from_menu()
                 return
             
-            elif event.type == pygame.KEYDOWN and self.scene == "game":
-                if self.chat_active:
-                    if event.key == pygame.K_RETURN:
-                        if self.chat_input:
-                            self.send_chat_message(self.chat_input)
-                            self.chat_input = ""
-                        self.chat_active = False
-                    elif event.key == pygame.K_BACKSPACE:
-                        self.chat_input = self.chat_input[:-1]
+            elif self.scene == "game":
+                if event.type == pygame.KEYDOWN:
+                    if event.key == pygame.K_F11:
+                        self.fullscreen = not self.fullscreen
+                        if self.fullscreen:
+                            self.screen = pygame.display.set_mode((0, 0), pygame.FULLSCREEN)
+                        else:
+                            self.screen = pygame.display.set_mode((WINDOW_WIDTH, WINDOW_HEIGHT), pygame.RESIZABLE)
+                    elif self.chat_active:
+                        if event.key == pygame.K_RETURN:
+                            if self.chat_input:
+                                self.send_chat_message(self.chat_input)
+                                self.chat_input = ""
+                            self.chat_active = False
+                        elif event.key == pygame.K_BACKSPACE:
+                            self.chat_input = self.chat_input[:-1]
+                        elif event.unicode and event.unicode.isprintable():
+                            self.chat_input += event.unicode
                     else:
-                        self.chat_input += event.unicode
-                else:
-                    if event.key == pygame.K_RETURN:
-                        self.chat_active = True
-                    elif event.key == pygame.K_SPACE:
-                        self.handle_attack()
-                    elif event.key == pygame.K_ESCAPE:
-                        self.running = False
-            elif event.type == pygame.KEYUP and self.scene == "game":
-                if event.key == pygame.K_DOWN or event.key == pygame.K_s:
-                    # Reset crouching when down key released
-                    with self.lock:
-                        for player_data in self.players.values():
-                            if player_data.get("id") == self.player_id:
-                                player_data["is_crouching"] = False
-                                break
+                        if event.key == pygame.K_RETURN:
+                            self.chat_active = True
+                        elif event.key == pygame.K_SPACE:
+                            self.handle_attack()
+                        elif event.key == pygame.K_ESCAPE:
+                            self.running = False
+                elif event.type == pygame.VIDEORESIZE:
+                    self.screen = pygame.display.set_mode(event.size, pygame.RESIZABLE)
     
     def handle_attack(self):
         """Handle attack input"""
@@ -345,33 +343,23 @@ class GameClient:
                 except Exception as e:
                     print(f"Failed to request state: {e}")
         
-        # Handle keyboard input (only skip if chat is active)
+        # Handle keyboard input - FIXED: No attack blocking
         if not self.chat_active:
             keys = pygame.key.get_pressed()
             
-            # Movement
-            direction = Direction.NONE
-            action = ActionType.NONE
-            
+            # Movement - works during and after attacks
             if keys[pygame.K_UP] or keys[pygame.K_w]:
-                direction = Direction.UP
-                action = ActionType.MOVE
+                self.send_input(ActionType.MOVE, Direction.UP)
             elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
-                direction = Direction.DOWN
-                action = ActionType.MOVE
+                self.send_input(ActionType.MOVE, Direction.DOWN)
             elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
-                direction = Direction.LEFT
-                action = ActionType.MOVE
+                self.send_input(ActionType.MOVE, Direction.LEFT)
             elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-                direction = Direction.RIGHT
-                action = ActionType.MOVE
-            
-            if action != ActionType.NONE:
-                self.send_input(action, direction)
+                self.send_input(ActionType.MOVE, Direction.RIGHT)
         
-        # Update attack animation
+        # Update attack animation - shorter duration
         if self.showing_attack:
-            if time.time() - self.attack_start_time > 0.2:
+            if time.time() - self.attack_start_time > 0.05:
                 self.showing_attack = False
     
     def render(self):
@@ -383,17 +371,23 @@ class GameClient:
             pygame.display.flip()
             return
         
+        # Calculate arena position to center it
+        screen_width = self.screen.get_width()
+        screen_height = self.screen.get_height()
+        arena_x = max(50, (screen_width - ARENA_WIDTH) // 2)
+        arena_y = max(50, (screen_height - ARENA_HEIGHT) // 2)
+        
         # Draw arena background with simple platforms
-        arena_rect = pygame.Rect(50, 50, ARENA_WIDTH, ARENA_HEIGHT)
+        arena_rect = pygame.Rect(arena_x, arena_y, ARENA_WIDTH, ARENA_HEIGHT)
         pygame.draw.rect(self.screen, (40, 40, 50), arena_rect)
         pygame.draw.rect(self.screen, (60, 60, 80), arena_rect, 3)
         
         # Platforms (basic smash-like layout)
         platform_color = (80, 90, 120)
-        base_platform = pygame.Rect(50 + 80, 50 + ARENA_HEIGHT - 80, ARENA_WIDTH - 160, 20)
-        left_platform = pygame.Rect(50 + 120, 50 + ARENA_HEIGHT - 220, 180, 18)
-        right_platform = pygame.Rect(50 + ARENA_WIDTH - 300, 50 + ARENA_HEIGHT - 220, 180, 18)
-        top_platform = pygame.Rect(50 + ARENA_WIDTH//2 - 120, 50 + 120, 240, 16)
+        base_platform = pygame.Rect(arena_x + 80, arena_y + ARENA_HEIGHT - 80, ARENA_WIDTH - 160, 20)
+        left_platform = pygame.Rect(arena_x + 120, arena_y + ARENA_HEIGHT - 220, 180, 18)
+        right_platform = pygame.Rect(arena_x + ARENA_WIDTH - 300, arena_y + ARENA_HEIGHT - 220, 180, 18)
+        top_platform = pygame.Rect(arena_x + ARENA_WIDTH//2 - 120, arena_y + 120, 240, 16)
         for rect in (base_platform, left_platform, right_platform, top_platform):
             pygame.draw.rect(self.screen, platform_color, rect, border_radius=4)
         
@@ -407,8 +401,8 @@ class GameClient:
                 direction = player_data.get("direction", "none")
                 
                 # Offset to arena position
-                screen_x = 50 + x
-                screen_y = 50 + y
+                screen_x = arena_x + x
+                screen_y = arena_y + y
                 
                 # Draw player
                 player_color = PLAYER_COLORS[(player_id - 1) % len(PLAYER_COLORS)]
@@ -499,45 +493,49 @@ class GameClient:
                               (x + arrow_size // 2 + 15, y + arrow_size // 2)])
     
     def draw_chat(self):
-        """Draw chat messages"""
+        """Draw chat messages - FIXED"""
         font = pygame.font.Font(None, 20)
-        y_offset = WINDOW_HEIGHT - 150
+        screen_height = self.screen.get_height()
+        y_offset = screen_height - 140
         
-        # Draw chat background
-        chat_bg = pygame.Rect(50, y_offset - 10, 400, 120)
-        pygame.draw.rect(self.screen, (0, 0, 0, 128), chat_bg)
-        pygame.draw.rect(self.screen, (100, 100, 100), chat_bg, 1)
-        
-        # Draw chat messages
         with self.lock:
             messages_to_show = self.chat_messages[-5:] if self.chat_messages else []
         
+        # Always draw background for visibility
+        chat_bg = pygame.Rect(10, y_offset - 30, 500, 120)
+        pygame.draw.rect(self.screen, (30, 30, 30), chat_bg)
+        pygame.draw.rect(self.screen, (100, 100, 100), chat_bg, 2)
+        
+        # Chat label
+        label_surface = font.render("Chat:", True, (150, 150, 150))
+        self.screen.blit(label_surface, (15, y_offset - 25))
+        
+        # Draw messages - FIXED: Simple and direct
         for i, msg_data in enumerate(messages_to_show):
             text = msg_data.get("text", "")
             is_system = msg_data.get("is_system", False)
             
-            color = (150, 150, 200) if is_system else (220, 220, 220)
-            try:
-                if text:  # Only render non-empty text
-                    text_surface = font.render(str(text), True, color)
-                    self.screen.blit(text_surface, (60, y_offset + i * 22))
-            except Exception as e:
-                print(f"Chat render error: {e}")
+            if text:
+                color = (255, 255, 150) if is_system else (255, 255, 255)
+                text_surface = font.render(str(text), True, color)
+                self.screen.blit(text_surface, (15, y_offset + i * 22))
     
     def draw_instructions(self):
         """Draw control instructions"""
-        font = pygame.font.Font(None, 20)
+        font = pygame.font.Font(None, 18)
         instructions = [
             "Controls:",
-            "Arrow Keys / WASD: Move",
+            "WASD/Arrows: Move",
             "Space: Attack",
             "Enter: Chat",
+            "F11: Fullscreen",
             "Esc: Exit"
         ]
         
+        screen_width = self.screen.get_width()
         for i, text in enumerate(instructions):
             text_surface = font.render(text, True, (150, 150, 150))
-            self.screen.blit(text_surface, (900, 60 + i * 25))
+            self.screen.blit(text_surface, (screen_width - 150, 60 + i * 20))
     
     def draw_chat_input(self):
         """Draw chat input box"""
@@ -545,33 +543,38 @@ class GameClient:
         input_text = f"> {self.chat_input}_"
         text_surface = font.render(input_text, True, (255, 255, 255))
         
-        # Draw background
-        pygame.draw.rect(self.screen, (50, 50, 50), 
-                        (50, WINDOW_HEIGHT - 100, WINDOW_WIDTH - 100, 30))
+        screen_width = self.screen.get_width()
+        screen_height = self.screen.get_height()
         
-        self.screen.blit(text_surface, (60, WINDOW_HEIGHT - 95))
+        # Draw semi-transparent background
+        input_rect = pygame.Rect(10, screen_height - 35, min(500, screen_width - 20), 25)
+        bg_surface = pygame.Surface((input_rect.width, input_rect.height))
+        bg_surface.set_alpha(150)
+        bg_surface.fill((0, 0, 0))
+        self.screen.blit(bg_surface, input_rect)
+        
+        self.screen.blit(text_surface, (15, screen_height - 32))
     
     def draw_attack_animation(self):
         """Draw attack animation"""
         # This will be shown as a visual effect on the attacking player
         if self.player_id and self.player_id in self.players:
             player = self.players[self.player_id]
-            x = int(50 + player.get("x", 0) + 20)
-            y = int(50 + player.get("y", 0) + 20)
+            screen_width = self.screen.get_width()
+            screen_height = self.screen.get_height()
+            arena_x = max(50, (screen_width - ARENA_WIDTH) // 2)
+            arena_y = max(50, (screen_height - ARENA_HEIGHT) // 2)
+            
+            x = int(arena_x + player.get("x", 0) + 20)
+            y = int(arena_y + player.get("y", 0) + 20)
             direction = Direction(player.get("direction", "none"))
             
             # Draw attack range indicator
-            attack_range = 60
             attack_color = (255, 200, 0)
             
             elapsed = time.time() - self.attack_start_time
-            alpha = int(255 * (1 - elapsed / 0.2))
             
-            attack_color = (min(255, attack_color[0]), 
-                          min(255, attack_color[1]), 
-                          min(255, attack_color[2]))
-            
-            if elapsed < 0.2:
+            if elapsed < 0.05:
                 if direction == Direction.UP:
                     pygame.draw.line(self.screen, attack_color, (x, y - 20), (x, y - 50), 5)
                 elif direction == Direction.DOWN:
@@ -588,20 +591,23 @@ class GameClient:
         input_font = pygame.font.Font(None, 32)
         btn_font = pygame.font.Font(None, 32)
         
+        screen_width = self.screen.get_width()
+        screen_height = self.screen.get_height()
+        
         # Title
         title = title_font.render("LAN Lords", True, (230, 230, 255))
-        self.screen.blit(title, title.get_rect(center=(WINDOW_WIDTH//2, 160)))
+        self.screen.blit(title, title.get_rect(center=(screen_width//2, 160)))
         
         # Labels
         name_label = label_font.render("Name", True, (180, 180, 200))
         ip_label = label_font.render("Server IP", True, (180, 180, 200))
-        self.screen.blit(name_label, (WINDOW_WIDTH//2 - 150, 235))
-        self.screen.blit(ip_label, (WINDOW_WIDTH//2 - 150, 295))
+        self.screen.blit(name_label, (screen_width//2 - 150, 235))
+        self.screen.blit(ip_label, (screen_width//2 - 150, 295))
         
         # Inputs
-        name_rect = pygame.Rect(WINDOW_WIDTH//2 - 150, 260, 300, 36)
-        ip_rect = pygame.Rect(WINDOW_WIDTH//2 - 150, 320, 300, 36)
-        btn_rect = pygame.Rect(WINDOW_WIDTH//2 - 80, 380, 160, 44)
+        name_rect = pygame.Rect(screen_width//2 - 150, 260, 300, 36)
+        ip_rect = pygame.Rect(screen_width//2 - 150, 320, 300, 36)
+        btn_rect = pygame.Rect(screen_width//2 - 80, 380, 160, 44)
         
         pygame.draw.rect(self.screen, (50, 50, 70), name_rect, border_radius=6)
         pygame.draw.rect(self.screen, (50, 50, 70), ip_rect, border_radius=6)
@@ -629,8 +635,8 @@ class GameClient:
         self.screen.blit(btn_label, btn_label.get_rect(center=btn_rect.center))
         
         # Footer
-        footer = label_font.render("Tab to switch fields • Enter to connect", True, (140, 140, 160))
-        self.screen.blit(footer, footer.get_rect(center=(WINDOW_WIDTH//2, 450)))
+        footer = label_font.render("Tab to switch fields • Enter to connect • F11 for fullscreen", True, (140, 140, 160))
+        self.screen.blit(footer, footer.get_rect(center=(screen_width//2, 450)))
 
     def try_connect_from_menu(self):
         """Attempt to connect using menu inputs and switch to game scene on success"""
@@ -647,4 +653,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

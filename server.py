@@ -354,6 +354,9 @@ class GameServer:
             except Exception as e:
                 print(f"   Error sending PLAYER_JOINED: {e}")
             
+            # Add welcome message
+            self.add_chat_message(f"{name} joined the game!", is_system=True)
+            
             # Send initial game state
             players_data = []
             for pid, p in self.players.items():
@@ -364,7 +367,8 @@ class GameServer:
                     "y": p.y,
                     "health": p.health,
                     "direction": p.direction.value,
-                    "max_health": PLAYER_MAX_HEALTH
+                    "max_health": PLAYER_MAX_HEALTH,
+                    "is_crouching": p.is_crouching
                 })
             game_state = {
                 "players": players_data,
@@ -381,7 +385,6 @@ class GameServer:
                     to_remove.append(pid)
             for pid in to_remove:
                 self.players.pop(pid, None)
-            print(f"   Broadcasted game state in add_player")
 
             print(f"   Returning player_id: {player_id}")
             return player_id
@@ -395,6 +398,7 @@ class GameServer:
     
     def handle_message(self, player_id: int, message: Message):
         """Process incoming message from a player"""
+        print(f"Server received {message.type.value} from player {player_id}")
         if message.type == MessageType.PLAYER_INPUT:
             self.handle_player_input(player_id, message.data)
         elif message.type == MessageType.ATTACK:
@@ -481,16 +485,22 @@ class GameServer:
     
     def handle_chat_message(self, player_id: int, data: Dict):
         """Handle chat message from player"""
+        print(f"Received chat message from player {player_id}: {data}")
         with self.lock:
             if player_id not in self.players:
+                print(f"Player {player_id} not found in players list")
                 return
             
             player = self.players[player_id]
             text = data.get("text", "")
             
             if text:
+                print(f"💬 {player.name}: {text}")
                 self.add_chat_message(f"{player.name}: {text}", is_system=False)
+                print(f"Broadcasting game state after chat message")
                 self.broadcast_game_state()
+            else:
+                print(f"Empty chat message received from {player.name}")
     
     def add_chat_message(self, text: str, is_system: bool = False):
         """Add a message to chat history"""
@@ -499,6 +509,7 @@ class GameServer:
             "is_system": is_system,
             "timestamp": time.time()
         })
+        print(f"Added chat message: {text} (total: {len(self.chat_history)})")
         
         # Keep only recent messages
         if len(self.chat_history) > 100:
@@ -524,15 +535,11 @@ class GameServer:
     
     def broadcast_game_state(self):
         """Send game state to all connected players"""
-        print(f"   broadcast_game_state called")
         if not self.players:
-            print(f"   No players, returning")
             return
-        print(f"   Calling get_game_state...")
+        
         game_state = self.get_game_state()
-        print(f"   Got game_state with {len(game_state.get('players', []))} players")
         message = Message(MessageType.GAME_STATE, game_state)
-        print(f"   Created message")
         
         to_remove = []
         for player_id, player in self.players.items():
@@ -546,10 +553,6 @@ class GameServer:
         # Remove disconnected players
         for player_id in to_remove:
             self.remove_player(player_id)
-        try:
-            print(f"   → Broadcast GAME_STATE to {len(self.players)} players (entities={len(game_state.get('players', []))})")
-        except:
-            pass
     
     def broadcast_player_joined(self, player_id: int):
         """Notify all players that a new player joined"""
@@ -583,9 +586,7 @@ class GameServer:
     
     def get_game_state(self) -> Dict:
         """Get current game state"""
-        print(f"   get_game_state: acquiring lock...")
         with self.lock:
-            print(f"   get_game_state: lock acquired")
             players_data = []
             for player_id, player in self.players.items():
                 players_data.append({
