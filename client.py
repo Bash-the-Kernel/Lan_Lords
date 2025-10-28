@@ -56,6 +56,10 @@ class GameClient:
         self.menu_name = "Player"
         self.menu_ip = "127.0.0.1"
         self.menu_focus = "name"  # "name" or "ip" or "button"
+
+        # Sync state
+        self.received_first_state = False
+        self.last_state_request_time = 0.0
     
     def connect(self, server_ip: str, player_name: str) -> bool:
         """Connect to the game server"""
@@ -66,6 +70,7 @@ class GameClient:
             # Send connection message
             connect_msg = Message(MessageType.CONNECT, {"name": player_name})
             self.socket.sendall(connect_msg.to_json().encode('utf-8') + b'\n')
+            print("➡️  Sent CONNECT message")
             
             self.server_address = server_ip
             self.player_name = player_name
@@ -96,6 +101,7 @@ class GameClient:
                 while '\n' in buffer:
                     line, buffer = buffer.split('\n', 1)
                     if line:
+                        # Debug: print first 60 chars of message
                         self.handle_message(line)
             except Exception as e:
                 print(f"Error receiving message: {e}")
@@ -117,6 +123,7 @@ class GameClient:
                     
                     # Update chat
                     self.chat_messages = message.data.get("chat", [])
+                    self.received_first_state = True
             
             elif message.type == MessageType.PLAYER_JOINED:
                 # Check if this is our own join message with ID assignment
@@ -126,6 +133,16 @@ class GameClient:
                         print(f"✅ Your ID is {self.player_id}")
                 else:
                     print(f"✅ Player joined: {message.data.get('name')}")
+            
+            if message.type == MessageType.GAME_STATE:
+                with self.lock:
+                    # Update player data
+                    for player_data in message.data.get("players", []):
+                        self.players[player_data["id"]] = player_data
+                    
+                    # Update chat
+                    self.chat_messages = message.data.get("chat", [])
+                    self.received_first_state = True
             
             elif message.type == MessageType.PLAYER_LEFT:
                 player_id = message.data.get("player_id")
@@ -280,48 +297,77 @@ class GameClient:
                         self.handle_attack()
                     elif event.key == pygame.K_ESCAPE:
                         self.running = False
+            elif event.type == pygame.KEYUP and self.scene == "game":
+                if event.key == pygame.K_DOWN or event.key == pygame.K_s:
+                    # Reset crouching when down key released
+                    with self.lock:
+                        for player_data in self.players.values():
+                            if player_data.get("id") == self.player_id:
+                                player_data["is_crouching"] = False
+                                break
     
     def handle_attack(self):
         """Handle attack input"""
         if self.player_id is None or self.player_id not in self.players:
             return
         
-        player = self.players[self.player_id]
-        direction = Direction(player.get("direction", "none"))
+        # Get current velocity-based direction
+        keys = pygame.key.get_pressed()
+        if keys[pygame.K_LEFT] or keys[pygame.K_a]:
+            direction = Direction.LEFT
+        elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+            direction = Direction.RIGHT
+        elif keys[pygame.K_UP] or keys[pygame.K_w]:
+            direction = Direction.UP
+        elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+            direction = Direction.DOWN
+        else:
+            # Use last facing direction
+            player = self.players[self.player_id]
+            direction = Direction(player.get("direction", "right"))
         
-        if direction != Direction.NONE:
-            self.send_attack(direction)
+        self.send_attack(direction)
     
     def update(self):
         """Update game state"""
         if self.scene == "menu":
             return
         
-        if self.chat_active:
-            return
+        # If connected but haven't received state, request it periodically
+        if self.connected and not self.received_first_state:
+            now = time.time()
+            if now - self.last_state_request_time > 0.5 and self.player_id is not None:
+                try:
+                    msg = Message(MessageType.REQUEST_STATE, {"player_id": self.player_id})
+                    self.socket.sendall(msg.to_json().encode('utf-8') + b'\n')
+                    self.last_state_request_time = now
+                    print("➡️  Requested GAME_STATE")
+                except Exception as e:
+                    print(f"Failed to request state: {e}")
         
-        # Handle keyboard input
-        keys = pygame.key.get_pressed()
-        
-        # Movement
-        direction = Direction.NONE
-        action = ActionType.NONE
-        
-        if keys[pygame.K_UP] or keys[pygame.K_w]:
-            direction = Direction.UP
-            action = ActionType.MOVE
-        elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
-            direction = Direction.DOWN
-            action = ActionType.MOVE
-        elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
-            direction = Direction.LEFT
-            action = ActionType.MOVE
-        elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-            direction = Direction.RIGHT
-            action = ActionType.MOVE
-        
-        if action != ActionType.NONE:
-            self.send_input(action, direction)
+        # Handle keyboard input (only skip if chat is active)
+        if not self.chat_active:
+            keys = pygame.key.get_pressed()
+            
+            # Movement
+            direction = Direction.NONE
+            action = ActionType.NONE
+            
+            if keys[pygame.K_UP] or keys[pygame.K_w]:
+                direction = Direction.UP
+                action = ActionType.MOVE
+            elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                direction = Direction.DOWN
+                action = ActionType.MOVE
+            elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                direction = Direction.LEFT
+                action = ActionType.MOVE
+            elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                direction = Direction.RIGHT
+                action = ActionType.MOVE
+            
+            if action != ActionType.NONE:
+                self.send_input(action, direction)
         
         # Update attack animation
         if self.showing_attack:
@@ -367,15 +413,21 @@ class GameClient:
                 # Draw player
                 player_color = PLAYER_COLORS[(player_id - 1) % len(PLAYER_COLORS)]
                 
+                # Check if crouching
+                is_crouching = player_data.get("is_crouching", False)
+                
                 if player_id == self.player_id:
                     # Highlight own player
                     pygame.draw.circle(self.screen, player_color, 
                                      (screen_x + 20, screen_y + 20), 
                                      PLAYER_SIZE // 2 + 2)
                 
+                # Draw player (squished if crouching)
+                player_height = PLAYER_SIZE if not is_crouching else PLAYER_SIZE // 2
+                player_y = screen_y + 20 if not is_crouching else screen_y + 40
                 pygame.draw.circle(self.screen, player_color, 
-                                 (screen_x + 20, screen_y + 20), 
-                                 PLAYER_SIZE // 2)
+                                 (screen_x + 20, player_y), 
+                                 player_height // 2)
                 
                 # Draw health bar
                 bar_width = PLAYER_SIZE
@@ -448,16 +500,29 @@ class GameClient:
     
     def draw_chat(self):
         """Draw chat messages"""
-        font = pygame.font.Font(None, 18)
+        font = pygame.font.Font(None, 20)
         y_offset = WINDOW_HEIGHT - 150
         
-        for i, msg_data in enumerate(self.chat_messages[-5:]):  # Show last 5 messages
+        # Draw chat background
+        chat_bg = pygame.Rect(50, y_offset - 10, 400, 120)
+        pygame.draw.rect(self.screen, (0, 0, 0, 128), chat_bg)
+        pygame.draw.rect(self.screen, (100, 100, 100), chat_bg, 1)
+        
+        # Draw chat messages
+        with self.lock:
+            messages_to_show = self.chat_messages[-5:] if self.chat_messages else []
+        
+        for i, msg_data in enumerate(messages_to_show):
             text = msg_data.get("text", "")
             is_system = msg_data.get("is_system", False)
             
-            color = (100, 100, 100) if is_system else (200, 200, 200)
-            text_surface = font.render(text, True, color)
-            self.screen.blit(text_surface, (60, y_offset + i * 20))
+            color = (150, 150, 200) if is_system else (220, 220, 220)
+            try:
+                if text:  # Only render non-empty text
+                    text_surface = font.render(str(text), True, color)
+                    self.screen.blit(text_surface, (60, y_offset + i * 22))
+            except Exception as e:
+                print(f"Chat render error: {e}")
     
     def draw_instructions(self):
         """Draw control instructions"""

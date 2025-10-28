@@ -18,6 +18,7 @@ class MessageType(Enum):
     PLAYER_LEFT = "player_left"
     ATTACK = "attack"
     DAMAGE = "damage"
+    REQUEST_STATE = "request_state"
 
 class ActionType(Enum):
     """Player action types"""
@@ -90,6 +91,10 @@ def create_chat_message(player_id: int, text: str) -> Message:
 def create_game_state_message(game_state: Dict[str, Any]) -> Message:
     """Create a game state broadcast message"""
     return Message(MessageType.GAME_STATE, game_state)
+
+def create_request_state_message(player_id: int) -> Message:
+    """Create a request for current game state"""
+    return Message(MessageType.REQUEST_STATE, {"player_id": player_id})
 
 def create_disconnect_message(player_id: int) -> Message:
     """Create a disconnect message"""

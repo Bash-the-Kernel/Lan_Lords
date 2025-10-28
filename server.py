@@ -26,8 +26,14 @@ class Player:
     name: str
     x: float
     y: float
-    health: int
-    direction: Direction
+    vx: float = 0.0  # Velocity X
+    vy: float = 0.0  # Velocity Y
+    health: int = PLAYER_MAX_HEALTH
+    direction: Direction = Direction.NONE
+    is_jumping: bool = False
+    can_double_jump: bool = False
+    is_crouching: bool = False
+    is_grounded: bool = False
     last_attack_time: float = 0.0
     conn: Optional[socket.socket] = None
     address: Optional[Tuple[str, int]] = None
@@ -41,24 +47,90 @@ class Player:
     def attack(self, current_time: float):
         self.last_attack_time = current_time
     
+    def update_physics(self, platforms):
+        """Update player physics (gravity, collisions)"""
+        GRAVITY = 0.5
+        MAX_FALL_SPEED = 12
+        
+        # Apply gravity
+        if not self.is_grounded:
+            self.vy += GRAVITY
+            if self.vy > MAX_FALL_SPEED:
+                self.vy = MAX_FALL_SPEED
+        
+        # Update position
+        self.x += self.vx
+        self.y += self.vy
+        
+        # Horizontal friction
+        self.vx *= 0.85
+        if abs(self.vx) < 0.1:
+            self.vx = 0
+        
+        # Check platform collisions
+        self.is_grounded = False
+        player_bottom = self.y + 40
+        player_top = self.y
+        player_left = self.x
+        player_right = self.x + 40
+        
+        for platform in platforms:
+            # Check if player is above platform
+            if player_bottom >= platform[1] and self.vy > 0:
+                # Check X overlap
+                if player_left < platform[0] + platform[2] and player_right > platform[0]:
+                    # Landing on top
+                    if player_top < platform[1]:
+                        self.y = platform[1] - 40
+                        self.vy = 0
+                        self.is_grounded = True
+                        self.is_jumping = False
+                        self.can_double_jump = True
+            
+            # Side collisions
+            if player_bottom > platform[1] and player_top < platform[1] + platform[3]:
+                # Hit from left
+                if player_right > platform[0] and self.vx > 0 and player_left < platform[0]:
+                    self.x = platform[0] - 40
+                    self.vx = 0
+                # Hit from right
+                if player_left < platform[0] + platform[2] and self.vx < 0 and player_right > platform[0] + platform[2]:
+                    self.x = platform[0] + platform[2]
+                    self.vx = 0
+        
+        # Arena bounds
+        self.x = max(0, min(ARENA_WIDTH - 40, self.x))
+        self.y = max(0, min(ARENA_HEIGHT - 40, self.y))
+        
+        if self.y >= ARENA_HEIGHT - 40:
+            self.y = ARENA_HEIGHT - 40
+            self.vy = 0
+            self.is_grounded = True
+            self.is_jumping = False
+            self.can_double_jump = True
+    
     def move(self, action: ActionType, direction: Direction):
         """Update player movement state"""
         self.direction = direction
         
-        if action == ActionType.MOVE and direction != Direction.NONE:
-            speed = PLAYER_SPEED
-            if direction == Direction.UP:
-                self.y -= speed
-            elif direction == Direction.DOWN:
-                self.y += speed
-            elif direction == Direction.LEFT:
-                self.x -= speed
+        if action == ActionType.MOVE:
+            if direction == Direction.LEFT:
+                self.vx = -PLAYER_SPEED * 0.8
             elif direction == Direction.RIGHT:
-                self.x += speed
-            
-            # Keep player within arena bounds
-            self.x = max(0, min(ARENA_WIDTH - 40, self.x))
-            self.y = max(0, min(ARENA_HEIGHT - 40, self.y))
+                self.vx = PLAYER_SPEED * 0.8
+            elif direction == Direction.UP:
+                # Jump
+                if self.is_grounded:
+                    self.vy = -13
+                    self.is_jumping = True
+                    self.can_double_jump = True
+                elif not self.is_jumping and self.can_double_jump:
+                    self.vy = -13
+                    self.is_jumping = True
+                    self.can_double_jump = False
+            elif direction == Direction.DOWN:
+                # Crouch
+                self.is_crouching = True
 
 class GameServer:
     """Main game server that manages players and game state"""
@@ -71,6 +143,13 @@ class GameServer:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.chat_history: List[Dict[str, any]] = []
+        # Define platforms (x, y, width, height)
+        self.platforms = [
+            (80, ARENA_HEIGHT - 80, ARENA_WIDTH - 160, 20),  # Ground
+            (120, ARENA_HEIGHT - 220, 180, 18),  # Left platform
+            (ARENA_WIDTH - 300, ARENA_HEIGHT - 220, 180, 18),  # Right platform
+            (ARENA_WIDTH//2 - 120, 120, 240, 16),  # Top platform
+        ]
     
     def start(self):
         """Start the game server"""
@@ -109,69 +188,131 @@ class GameServer:
             self.stop()
 
     def broadcast_loop(self):
-        """Periodically broadcast game state to all clients"""
+        """Periodically update physics and broadcast game state to all clients"""
         interval = 1.0 / max(1, GAME_TICK_RATE)
         while self.running:
             try:
-                self.broadcast_game_state()
                 time.sleep(interval)
-            except Exception:
+                # Update physics even when no input
+                with self.lock:
+                    for p in self.players.values():
+                        p.update_physics(self.platforms)
+                
+                # Broadcast game state
+                if self.players:
+                    game_state = self.get_game_state()
+                    message = Message(MessageType.GAME_STATE, game_state)
+                    payload = message.to_json().encode('utf-8') + b'\n'
+                    for pid, p in self.players.items():
+                        try:
+                            p.conn.sendall(payload)
+                        except:
+                            pass
+            except Exception as e:
                 time.sleep(interval)
     
     def handle_client(self, client_socket: socket.socket, address: Tuple[str, int]):
-        """Handle communication with a single client"""
+        """Handle communication with a single client using newline-delimited JSON messages"""
         player_id = None
+        buffer = ""
         try:
-            # Wait for connection message
-            data = client_socket.recv(BUFFER_SIZE).decode('utf-8')
-            if not data:
-                return
-            
-            message = Message.from_json(data)
-            
-            if message.type == MessageType.CONNECT:
-                player_name = message.data.get("name", f"Player")
-                player_id = self.add_player(client_socket, address, player_name)
-                
-                if player_id is None:
+            # Read until we get a CONNECT message
+            while self.running and player_id is None:
+                chunk = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+                if not chunk:
                     return
-                
-                print(f"✅ Player {player_id} ({player_name}) joined!")
-                
-                # Send initial game state
-                self.send_game_state(player_id)
-                
-                # Notify other players
-                self.broadcast_player_joined(player_id)
-                
-                # Main message loop
-                while self.running and player_id in self.players:
+                buffer += chunk
+                # Debug: show received chunk size
+                try:
+                    print(f"   Rx {len(chunk)} bytes from {address}")
+                    print(f"   Buffer now has {len(buffer)} chars: {buffer[:100]}")
+                except:
+                    pass
+                # Try to parse as-is if it looks complete
+                trimmed = buffer.strip()
+                if player_id is None and trimmed.startswith('{') and trimmed.endswith('}'):
+                    print(f"   Trying to parse CONNECT message...")
                     try:
-                        data = client_socket.recv(BUFFER_SIZE).decode('utf-8')
-                        if not data:
-                            break
-                        
-                        message = Message.from_json(data)
+                        message = Message.from_json(trimmed)
+                        print(f"   Parsed message type: {message.type}, name: {message.data.get('name')}")
+                        buffer = ""  # consumed
+                        if message.type == MessageType.CONNECT:
+                            print("   Message type is CONNECT, calling add_player...")
+                            player_name = message.data.get("name", f"Player")
+                            player_id = self.add_player(client_socket, address, player_name)
+                            print(f"   add_player returned: {player_id}")
+                            if player_id is None:
+                                print("   add_player returned None, returning")
+                                return
+                            print(f"✅ Player {player_id} ({player_name}) joined!")
+                            print(f"   Total players now: {len(self.players)}")
+                            print("   Done with join process")
+                    except Exception as e:
+                        print(f"Parse error (no newline): {e}")
+                        import traceback
+                        traceback.print_exc()
+                
+                # Also try newline-delimited
+                while '\n' in buffer and player_id is None:
+                    line, buffer = buffer.split('\n', 1)
+                    if not line:
+                        continue
+                    try:
+                        message = Message.from_json(line)
+                    except Exception as e:
+                        print(f"Invalid message during connect from {address}: {e}")
+                        continue
+                    if message.type == MessageType.CONNECT:
+                        player_name = message.data.get("name", f"Player")
+                        player_id = self.add_player(client_socket, address, player_name)
+                        if player_id is None:
+                            return
+                        print(f"✅ Player {player_id} ({player_name}) joined!")
+                        print(f"   Total players now: {len(self.players)}")
+                        self.send_game_state(player_id)
+                        self.broadcast_player_joined(player_id)
+
+
+            # Main message loop
+            while self.running and player_id in self.players:
+                chunk = client_socket.recv(BUFFER_SIZE).decode('utf-8')
+                if not chunk:
+                    break
+                buffer += chunk
+                while '\n' in buffer:
+                    line, buffer = buffer.split('\n', 1)
+                    if not line:
+                        continue
+                    try:
+                        message = Message.from_json(line)
                         self.handle_message(player_id, message)
                     except Exception as e:
                         print(f"Error handling message from player {player_id}: {e}")
-                        break
+                        # continue processing remaining buffered messages
+                        continue
         except Exception as e:
             print(f"Error in client handler: {e}")
         finally:
             if player_id:
                 self.remove_player(player_id)
-                client_socket.close()
+                try:
+                    client_socket.close()
+                except:
+                    pass
                 print(f"👋 Player {player_id} disconnected")
     
     def add_player(self, client_socket: socket.socket, address: Tuple[str, int], name: str) -> Optional[int]:
         """Add a new player to the game"""
+        print(f"   add_player called for {name}")
         with self.lock:
+            print(f"   Lock acquired, checking max players...")
             if len(self.players) >= MAX_PLAYERS:
+                print(f"   Max players reached ({len(self.players)} >= {MAX_PLAYERS})")
                 return None
             
             player_id = self.next_player_id
             self.next_player_id += 1
+            print(f"   Assigned player ID: {player_id}")
             
             # Spawn player at different positions based on ID
             spawn_positions = [
@@ -182,6 +323,7 @@ class GameServer:
             ]
             spawn_idx = (player_id - 1) % len(spawn_positions)
             x, y = spawn_positions[spawn_idx]
+            print(f"   Spawning at ({x}, {y})")
             
             player = Player(
                 id=player_id,
@@ -193,8 +335,10 @@ class GameServer:
                 conn=client_socket,
                 address=address
             )
+            print(f"   Created Player object")
             
             self.players[player_id] = player
+            print(f"   Added to players dict (total: {len(self.players)})")
             
             # Send player their own ID
             player_config = {
@@ -203,13 +347,43 @@ class GameServer:
             }
             config_msg = Message(MessageType.PLAYER_JOINED, player_config)
             try:
-                client_socket.sendall(config_msg.to_json().encode('utf-8') + b'\n')
-            except:
-                pass
+                payload = config_msg.to_json().encode('utf-8') + b'\n'
+                print(f"   Sending PLAYER_JOINED message ({len(payload)} bytes)")
+                client_socket.sendall(payload)
+                print(f"   Sent PLAYER_JOINED successfully")
+            except Exception as e:
+                print(f"   Error sending PLAYER_JOINED: {e}")
             
-            # Immediately broadcast full game state to everyone
-            self.broadcast_game_state()
+            # Send initial game state
+            players_data = []
+            for pid, p in self.players.items():
+                players_data.append({
+                    "id": p.id,
+                    "name": p.name,
+                    "x": p.x,
+                    "y": p.y,
+                    "health": p.health,
+                    "direction": p.direction.value,
+                    "max_health": PLAYER_MAX_HEALTH
+                })
+            game_state = {
+                "players": players_data,
+                "chat": self.chat_history[-10:],
+                "timestamp": time.time()
+            }
+            message = Message(MessageType.GAME_STATE, game_state)
+            to_remove = []
+            for pid, p in self.players.items():
+                try:
+                    payload = message.to_json().encode('utf-8') + b'\n'
+                    p.conn.sendall(payload)
+                except:
+                    to_remove.append(pid)
+            for pid in to_remove:
+                self.players.pop(pid, None)
+            print(f"   Broadcasted game state in add_player")
 
+            print(f"   Returning player_id: {player_id}")
             return player_id
     
     def remove_player(self, player_id: int):
@@ -227,6 +401,9 @@ class GameServer:
             self.handle_attack(player_id, message.data)
         elif message.type == MessageType.CHAT_MESSAGE:
             self.handle_chat_message(player_id, message.data)
+        elif message.type == MessageType.REQUEST_STATE:
+            # Send full game state back to requester
+            self.send_game_state(player_id)
     
     def handle_player_input(self, player_id: int, data: Dict):
         """Handle player movement input"""
@@ -238,10 +415,13 @@ class GameServer:
             action = ActionType(data.get("action", "none"))
             direction = Direction(data.get("direction", "none"))
             
-            player.move(action, direction)
+            # Handle input
+            if action == ActionType.MOVE:
+                player.move(action, direction)
             
-            # Broadcast updated game state
-            self.broadcast_game_state()
+            # Reset crouching for this player if not crouching
+            if direction != Direction.DOWN:
+                player.is_crouching = False
     
     def handle_attack(self, player_id: int, data: Dict):
         """Handle player attack"""
@@ -333,19 +513,32 @@ class GameServer:
         message = Message(MessageType.GAME_STATE, game_state)
         
         try:
-            self.players[player_id].conn.sendall(message.to_json().encode('utf-8') + b'\n')
+            payload = message.to_json().encode('utf-8') + b'\n'
+            self.players[player_id].conn.sendall(payload)
+            try:
+                print(f"   → Sent initial GAME_STATE to {player_id} with {len(game_state.get('players', []))} players")
+            except:
+                pass
         except Exception as e:
             print(f"Error sending game state to player {player_id}: {e}")
     
     def broadcast_game_state(self):
         """Send game state to all connected players"""
+        print(f"   broadcast_game_state called")
+        if not self.players:
+            print(f"   No players, returning")
+            return
+        print(f"   Calling get_game_state...")
         game_state = self.get_game_state()
+        print(f"   Got game_state with {len(game_state.get('players', []))} players")
         message = Message(MessageType.GAME_STATE, game_state)
+        print(f"   Created message")
         
         to_remove = []
         for player_id, player in self.players.items():
             try:
-                player.conn.sendall(message.to_json().encode('utf-8') + b'\n')
+                payload = message.to_json().encode('utf-8') + b'\n'
+                player.conn.sendall(payload)
             except Exception as e:
                 print(f"Error broadcasting to player {player_id}: {e}")
                 to_remove.append(player_id)
@@ -353,6 +546,10 @@ class GameServer:
         # Remove disconnected players
         for player_id in to_remove:
             self.remove_player(player_id)
+        try:
+            print(f"   → Broadcast GAME_STATE to {len(self.players)} players (entities={len(game_state.get('players', []))})")
+        except:
+            pass
     
     def broadcast_player_joined(self, player_id: int):
         """Notify all players that a new player joined"""
@@ -386,7 +583,9 @@ class GameServer:
     
     def get_game_state(self) -> Dict:
         """Get current game state"""
+        print(f"   get_game_state: acquiring lock...")
         with self.lock:
+            print(f"   get_game_state: lock acquired")
             players_data = []
             for player_id, player in self.players.items():
                 players_data.append({
@@ -396,7 +595,8 @@ class GameServer:
                     "y": player.y,
                     "health": player.health,
                     "direction": player.direction.value,
-                    "max_health": PLAYER_MAX_HEALTH
+                    "max_health": PLAYER_MAX_HEALTH,
+                    "is_crouching": player.is_crouching
                 })
             
             return {
