@@ -35,6 +35,7 @@ class GameClient:
         self.lock = threading.Lock()
         self.screen = None
         self.clock = None
+        self.connected = False
         
         # Input state
         self.keys_pressed = set()
@@ -70,6 +71,7 @@ class GameClient:
             self.player_name = player_name
             
             # Start receiver thread
+            self.connected = True
             receiver_thread = threading.Thread(target=self.receive_loop)
             receiver_thread.daemon = True
             receiver_thread.start()
@@ -84,7 +86,7 @@ class GameClient:
     def receive_loop(self):
         """Receive messages from server"""
         buffer = ""
-        while self.running:
+        while self.connected:
             try:
                 data = self.socket.recv(4096).decode('utf-8')
                 if not data:
@@ -99,6 +101,7 @@ class GameClient:
                 print(f"Error receiving message: {e}")
                 break
         
+        self.connected = False
         self.running = False
     
     def handle_message(self, json_str: str):
@@ -201,7 +204,11 @@ class GameClient:
             self.clock.tick(FPS)
         
         if self.socket:
-            self.socket.close()
+            try:
+                self.socket.close()
+            except:
+                pass
+        self.connected = False
         
         pygame.quit()
     

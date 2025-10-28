@@ -7,7 +7,7 @@ Configuration settings for LAN Lords
 # For LAN play (remote clients): Use "0.0.0.0" to listen on all interfaces
 # For local only: Use "127.0.0.1" or "localhost"
 SERVER_HOST = "0.0.0.0"  # Switch to "127.0.0.1" for local-only testing
-SERVER_PORT = 60000
+SERVER_PORT = 60001  # Changed from 60000
 MAX_PLAYERS = 4
 BUFFER_SIZE = 4096
 

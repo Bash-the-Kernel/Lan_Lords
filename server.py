@@ -79,6 +79,11 @@ class GameServer:
         print(f"🎮 LAN Lords Server started on {SERVER_HOST}:{SERVER_PORT}")
         print(f"Waiting for players to connect...")
         
+        # Start periodic broadcast loop for game state
+        broadcaster = threading.Thread(target=self.broadcast_loop)
+        broadcaster.daemon = True
+        broadcaster.start()
+
         try:
             while self.running:
                 client_socket, address = self.socket.accept()
@@ -102,6 +107,16 @@ class GameServer:
             print(f"Error in server loop: {e}")
         finally:
             self.stop()
+
+    def broadcast_loop(self):
+        """Periodically broadcast game state to all clients"""
+        interval = 1.0 / max(1, GAME_TICK_RATE)
+        while self.running:
+            try:
+                self.broadcast_game_state()
+                time.sleep(interval)
+            except Exception:
+                time.sleep(interval)
     
     def handle_client(self, client_socket: socket.socket, address: Tuple[str, int]):
         """Handle communication with a single client"""
@@ -192,6 +207,9 @@ class GameServer:
             except:
                 pass
             
+            # Immediately broadcast full game state to everyone
+            self.broadcast_game_state()
+
             return player_id
     
     def remove_player(self, player_id: int):
