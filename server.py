@@ -52,6 +52,8 @@ class Player:
         GRAVITY = 0.5
         MAX_FALL_SPEED = 12
         
+        old_x, old_y = self.x, self.y
+        
         # Apply gravity
         if not self.is_grounded:
             self.vy += GRAVITY
@@ -62,10 +64,19 @@ class Player:
         self.x += self.vx
         self.y += self.vy
         
+        # Debug: only print if position actually changed
+        if abs(self.x - old_x) > 0.1 or abs(self.y - old_y) > 0.1:
+            print(f"Player {self.id} physics: pos ({old_x:.1f}, {old_y:.1f}) -> ({self.x:.1f}, {self.y:.1f}), vel ({self.vx:.1f}, {self.vy:.1f})")
+        
         # Horizontal friction
+        old_vx = self.vx
         self.vx *= 0.85
         if abs(self.vx) < 0.1:
             self.vx = 0
+        
+        # Debug friction
+        if abs(old_vx - self.vx) > 0.1:
+            print(f"Player {self.id} friction: vx {old_vx:.1f} -> {self.vx:.1f}")
         
         # Check platform collisions
         self.is_grounded = False
@@ -81,6 +92,7 @@ class Player:
                 if player_left < platform[0] + platform[2] and player_right > platform[0]:
                     # Landing on top
                     if player_top < platform[1]:
+                        print(f"Player {self.id} landed on platform at y={platform[1]}")
                         self.y = platform[1] - 40
                         self.vy = 0
                         self.is_grounded = True
@@ -114,6 +126,7 @@ class Player:
         self.direction = direction
         
         if action == ActionType.MOVE:
+            old_vx, old_vy = self.vx, self.vy
             if direction == Direction.LEFT:
                 self.vx = -PLAYER_SPEED * 0.8
             elif direction == Direction.RIGHT:
@@ -131,6 +144,8 @@ class Player:
             elif direction == Direction.DOWN:
                 # Crouch
                 self.is_crouching = True
+            
+            print(f"Player {self.id} velocity: ({old_vx:.1f}, {old_vy:.1f}) -> ({self.vx:.1f}, {self.vy:.1f})")
 
 class GameServer:
     """Main game server that manages players and game state"""
@@ -399,15 +414,20 @@ class GameServer:
     def handle_message(self, player_id: int, message: Message):
         """Process incoming message from a player"""
         print(f"Server received {message.type.value} from player {player_id}")
-        if message.type == MessageType.PLAYER_INPUT:
-            self.handle_player_input(player_id, message.data)
-        elif message.type == MessageType.ATTACK:
-            self.handle_attack(player_id, message.data)
-        elif message.type == MessageType.CHAT_MESSAGE:
-            self.handle_chat_message(player_id, message.data)
-        elif message.type == MessageType.REQUEST_STATE:
-            # Send full game state back to requester
-            self.send_game_state(player_id)
+        try:
+            if message.type == MessageType.PLAYER_INPUT:
+                self.handle_player_input(player_id, message.data)
+            elif message.type == MessageType.ATTACK:
+                self.handle_attack(player_id, message.data)
+            elif message.type == MessageType.CHAT_MESSAGE:
+                self.handle_chat_message(player_id, message.data)
+            elif message.type == MessageType.REQUEST_STATE:
+                # Send full game state back to requester
+                self.send_game_state(player_id)
+        except Exception as e:
+            print(f"Error handling {message.type.value} from player {player_id}: {e}")
+            import traceback
+            traceback.print_exc()
     
     def handle_player_input(self, player_id: int, data: Dict):
         """Handle player movement input"""
@@ -419,9 +439,12 @@ class GameServer:
             action = ActionType(data.get("action", "none"))
             direction = Direction(data.get("direction", "none"))
             
-            # Handle input
+            print(f"Processing {action.value} {direction.value} for player {player_id}")
+            
+            # Handle input - ALWAYS process movement
             if action == ActionType.MOVE:
                 player.move(action, direction)
+                print(f"Player {player_id} moved {direction.value}: pos=({player.x:.1f}, {player.y:.1f})")
             
             # Reset crouching for this player if not crouching
             if direction != Direction.DOWN:
@@ -429,23 +452,28 @@ class GameServer:
     
     def handle_attack(self, player_id: int, data: Dict):
         """Handle player attack"""
+        print(f"Processing attack from player {player_id}")
         with self.lock:
             if player_id not in self.players:
+                print(f"Player {player_id} not found for attack")
                 return
             
             player = self.players[player_id]
             current_time = time.time()
             
             if not player.can_attack(current_time):
+                print(f"Player {player_id} attack on cooldown")
                 return
             
             player.attack(current_time)
             direction = Direction(data.get("direction", "none"))
+            print(f"Player {player_id} attacking {direction.value}")
             
             # Calculate attack position
             attack_x, attack_y = self.get_attack_position(player, direction)
             
             # Check for hits on other players
+            hit_someone = False
             for other_id, other_player in self.players.items():
                 if other_id == player_id or not other_player.is_alive():
                     continue
@@ -456,8 +484,20 @@ class GameServer:
                 distance = (dx * dx + dy * dy) ** 0.5
                 
                 if distance <= PLAYER_ATTACK_RANGE:
+                    hit_someone = True
                     other_player.health -= PLAYER_ATTACK_DAMAGE
                     other_player.health = max(0, other_player.health)
+                    
+                    # Apply knockback
+                    knockback_force = 8.0
+                    if direction == Direction.UP:
+                        other_player.vy = -knockback_force
+                    elif direction == Direction.DOWN:
+                        other_player.vy = knockback_force
+                    elif direction == Direction.LEFT:
+                        other_player.vx = -knockback_force
+                    elif direction == Direction.RIGHT:
+                        other_player.vx = knockback_force
                     
                     print(f"💥 Player {player_id} hit Player {other_id}! Health: {other_player.health}")
                     
@@ -467,8 +507,27 @@ class GameServer:
                         is_system=True
                     )
             
-            # Broadcast updated game state
-            self.broadcast_game_state()
+            # Send attack result to attacker for sound effect
+            self.send_attack_result(player_id, hit_someone)
+            
+            print(f"Attack processing complete for player {player_id}")
+    
+    def send_attack_result(self, player_id: int, hit: bool):
+        """Send attack result to player for sound effect"""
+        if player_id not in self.players:
+            return
+        
+        from protocol import MessageType
+        message = Message(MessageType.ATTACK_RESULT, {
+            "player_id": player_id,
+            "hit": hit
+        })
+        
+        try:
+            payload = message.to_json().encode('utf-8') + b'\n'
+            self.players[player_id].conn.sendall(payload)
+        except:
+            pass
     
     def get_attack_position(self, player: Player, direction: Direction) -> Tuple[float, float]:
         """Get the position where the attack occurs"""
@@ -497,8 +556,6 @@ class GameServer:
             if text:
                 print(f"💬 {player.name}: {text}")
                 self.add_chat_message(f"{player.name}: {text}", is_system=False)
-                print(f"Broadcasting game state after chat message")
-                self.broadcast_game_state()
             else:
                 print(f"Empty chat message received from {player.name}")
     
@@ -546,12 +603,14 @@ class GameServer:
             try:
                 payload = message.to_json().encode('utf-8') + b'\n'
                 player.conn.sendall(payload)
+                print(f"Broadcasted game state to player {player_id}")
             except Exception as e:
                 print(f"Error broadcasting to player {player_id}: {e}")
                 to_remove.append(player_id)
         
         # Remove disconnected players
         for player_id in to_remove:
+            print(f"Removing disconnected player {player_id}")
             self.remove_player(player_id)
     
     def broadcast_player_joined(self, player_id: int):

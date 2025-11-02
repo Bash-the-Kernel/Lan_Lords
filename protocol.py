@@ -17,6 +17,7 @@ class MessageType(Enum):
     PLAYER_JOINED = "player_joined"
     PLAYER_LEFT = "player_left"
     ATTACK = "attack"
+    ATTACK_RESULT = "attack_result"
     DAMAGE = "damage"
     REQUEST_STATE = "request_state"
 

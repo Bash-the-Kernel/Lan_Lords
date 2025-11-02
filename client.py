@@ -17,6 +17,7 @@ from config import (
 
 # Initialize Pygame
 pygame.init()
+pygame.mixer.init()
 
 # Constants
 WINDOW_WIDTH = 1200
@@ -45,9 +46,23 @@ class GameClient:
         
         # Attack state
         self.last_attack_time = 0
-        self.attack_cooldown = 1.0
+        self.attack_cooldown = 0.3
         self.showing_attack = False
         self.attack_start_time = 0
+        
+        # Sound effects
+        self.hit_sound_time = 0
+        self.miss_sound_time = 0
+        
+        # Load sound files
+        try:
+            self.hit_sound = pygame.mixer.Sound("hit_sound.wav")
+            self.miss_sound = pygame.mixer.Sound("miss_sound.wav")
+            print("✅ Sound files loaded successfully")
+        except:
+            self.hit_sound = None
+            self.miss_sound = None
+            print("⚠️  Sound files not found - using visual effects only")
         
         # Scene state
         self.scene = "menu"  # "menu" or "game"
@@ -140,6 +155,21 @@ class GameClient:
                 player_id = message.data.get("player_id")
                 with self.lock:
                     self.players.pop(player_id, None)
+            
+            elif message.type == MessageType.ATTACK_RESULT:
+                # Handle attack result for sound effects
+                if message.data.get("player_id") == self.player_id:
+                    hit = message.data.get("hit", False)
+                    if hit:
+                        self.hit_sound_time = time.time()
+                        if self.hit_sound:
+                            self.hit_sound.play()
+                        print("🎵 HIT sound!")
+                    else:
+                        self.miss_sound_time = time.time()
+                        if self.miss_sound:
+                            self.miss_sound.play()
+                        print("🎵 MISS sound!")
         
         except Exception as e:
             print(f"Error handling message: {e}")
@@ -147,6 +177,7 @@ class GameClient:
     def send_input(self, action: ActionType, direction: Direction):
         """Send player input to server"""
         if not self.socket or self.player_id is None:
+            print(f"Cannot send input: socket={self.socket is not None}, player_id={self.player_id}")
             return
         
         message = Message(MessageType.PLAYER_INPUT, {
@@ -158,16 +189,19 @@ class GameClient:
         try:
             payload = message.to_json().encode('utf-8') + b'\n'
             self.socket.sendall(payload)
+            print(f"Sent {action.value} {direction.value} to server")
         except Exception as e:
             print(f"Failed to send input: {e}")
     
     def send_attack(self, direction: Direction):
         """Send attack to server"""
         if not self.socket or self.player_id is None:
+            print(f"Cannot attack: socket={self.socket is not None}, player_id={self.player_id}")
             return
         
         current_time = time.time()
         if current_time - self.last_attack_time < self.attack_cooldown:
+            print(f"Attack on cooldown: {current_time - self.last_attack_time:.2f} < {self.attack_cooldown}")
             return
         
         self.last_attack_time = current_time
@@ -181,12 +215,14 @@ class GameClient:
         
         try:
             self.socket.sendall(message.to_json().encode('utf-8') + b'\n')
-        except:
-            pass
+            print(f"Sent attack {direction.value} to server")
+        except Exception as e:
+            print(f"Failed to send attack: {e}")
     
     def send_chat_message(self, text: str):
         """Send chat message to server"""
         if not self.socket or self.player_id is None:
+            print(f"Cannot send chat: socket={self.socket is not None}, player_id={self.player_id}")
             return
         
         message = Message(MessageType.CHAT_MESSAGE, {
@@ -200,6 +236,9 @@ class GameClient:
             print(f"Sent chat message: {text}")
         except Exception as e:
             print(f"Failed to send chat: {e}")
+            # Check if socket is still connected
+            if not self.connected:
+                print("Socket disconnected after chat message!")
     
     def run(self):
         """Main game loop"""
@@ -343,24 +382,46 @@ class GameClient:
                 except Exception as e:
                     print(f"Failed to request state: {e}")
         
-        # Handle keyboard input - FIXED: No attack blocking
-        if not self.chat_active:
+        # Handle keyboard input - DEBUG VERSION
+        if self.player_id is not None:
             keys = pygame.key.get_pressed()
             
-            # Movement - works during and after attacks
-            if keys[pygame.K_UP] or keys[pygame.K_w]:
-                self.send_input(ActionType.MOVE, Direction.UP)
-            elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
-                self.send_input(ActionType.MOVE, Direction.DOWN)
-            elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
-                self.send_input(ActionType.MOVE, Direction.LEFT)
-            elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
-                self.send_input(ActionType.MOVE, Direction.RIGHT)
+            # Only process movement when not in chat
+            if not self.chat_active:
+                moved = False
+                if keys[pygame.K_UP] or keys[pygame.K_w]:
+                    self.send_input(ActionType.MOVE, Direction.UP)
+                    moved = True
+                elif keys[pygame.K_DOWN] or keys[pygame.K_s]:
+                    self.send_input(ActionType.MOVE, Direction.DOWN)
+                    moved = True
+                elif keys[pygame.K_LEFT] or keys[pygame.K_a]:
+                    self.send_input(ActionType.MOVE, Direction.LEFT)
+                    moved = True
+                elif keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                    self.send_input(ActionType.MOVE, Direction.RIGHT)
+                    moved = True
+                
+                # Debug output
+                if moved:
+                    print(f"Movement sent: chat_active={self.chat_active}, player_id={self.player_id}")
+            else:
+                # Debug: check if we're detecting keys but not sending
+                if keys[pygame.K_UP] or keys[pygame.K_w] or keys[pygame.K_DOWN] or keys[pygame.K_s] or keys[pygame.K_LEFT] or keys[pygame.K_a] or keys[pygame.K_RIGHT] or keys[pygame.K_d]:
+                    print(f"Keys detected but not sending: chat_active={self.chat_active}, player_id={self.player_id}")
         
-        # Update attack animation - shorter duration
+        # Update attack animation
         if self.showing_attack:
             if time.time() - self.attack_start_time > 0.05:
                 self.showing_attack = False
+                print("Attack animation ended")
+        
+        # Update sound effect timers
+        current_time = time.time()
+        if self.hit_sound_time > 0 and current_time - self.hit_sound_time > 0.1:
+            self.hit_sound_time = 0
+        if self.miss_sound_time > 0 and current_time - self.miss_sound_time > 0.1:
+            self.miss_sound_time = 0
     
     def render(self):
         """Render game screen"""
@@ -463,6 +524,9 @@ class GameClient:
         if self.showing_attack:
             self.draw_attack_animation()
         
+        # Draw sound effect indicators
+        self.draw_sound_effects()
+        
         pygame.display.flip()
     
     def draw_direction_indicator(self, x: int, y: int, direction: str):
@@ -493,32 +557,27 @@ class GameClient:
                               (x + arrow_size // 2 + 15, y + arrow_size // 2)])
     
     def draw_chat(self):
-        """Draw chat messages - FIXED"""
-        font = pygame.font.Font(None, 20)
+        """Draw chat messages"""
+        font = pygame.font.Font(None, 18)
         screen_height = self.screen.get_height()
-        y_offset = screen_height - 140
+        y_start = screen_height - 120
         
+        # Get messages to show
         with self.lock:
-            messages_to_show = self.chat_messages[-5:] if self.chat_messages else []
+            messages = self.chat_messages[-5:] if self.chat_messages else []
         
-        # Always draw background for visibility
-        chat_bg = pygame.Rect(10, y_offset - 30, 500, 120)
-        pygame.draw.rect(self.screen, (30, 30, 30), chat_bg)
-        pygame.draw.rect(self.screen, (100, 100, 100), chat_bg, 2)
+        # Draw chat background
+        chat_rect = pygame.Rect(10, y_start - 10, 400, 110)
+        pygame.draw.rect(self.screen, (0, 0, 0, 180), chat_rect)
+        pygame.draw.rect(self.screen, (80, 80, 80), chat_rect, 1)
         
-        # Chat label
-        label_surface = font.render("Chat:", True, (150, 150, 150))
-        self.screen.blit(label_surface, (15, y_offset - 25))
-        
-        # Draw messages - FIXED: Simple and direct
-        for i, msg_data in enumerate(messages_to_show):
-            text = msg_data.get("text", "")
-            is_system = msg_data.get("is_system", False)
-            
+        # Draw messages
+        for i, msg in enumerate(messages):
+            text = msg.get("text", "")
             if text:
-                color = (255, 255, 150) if is_system else (255, 255, 255)
-                text_surface = font.render(str(text), True, color)
-                self.screen.blit(text_surface, (15, y_offset + i * 22))
+                color = (255, 255, 0) if msg.get("is_system", False) else (255, 255, 255)
+                surface = font.render(text, True, color)
+                self.screen.blit(surface, (15, y_start + i * 20))
     
     def draw_instructions(self):
         """Draw control instructions"""
@@ -529,7 +588,10 @@ class GameClient:
             "Space: Attack",
             "Enter: Chat",
             "F11: Fullscreen",
-            "Esc: Exit"
+            "Esc: Exit",
+            "",
+            "Faster attacks!",
+            "Knockback on hit!"
         ]
         
         screen_width = self.screen.get_width()
@@ -557,7 +619,6 @@ class GameClient:
     
     def draw_attack_animation(self):
         """Draw attack animation"""
-        # This will be shown as a visual effect on the attacking player
         if self.player_id and self.player_id in self.players:
             player = self.players[self.player_id]
             screen_width = self.screen.get_width()
@@ -569,20 +630,43 @@ class GameClient:
             y = int(arena_y + player.get("y", 0) + 20)
             direction = Direction(player.get("direction", "none"))
             
-            # Draw attack range indicator
-            attack_color = (255, 200, 0)
-            
+            # Draw attack slash effect
+            attack_color = (255, 255, 100)
             elapsed = time.time() - self.attack_start_time
             
             if elapsed < 0.05:
+                # Draw attack arc/slash
                 if direction == Direction.UP:
-                    pygame.draw.line(self.screen, attack_color, (x, y - 20), (x, y - 50), 5)
+                    pygame.draw.arc(self.screen, attack_color, (x-30, y-50, 60, 40), 0, 3.14, 4)
                 elif direction == Direction.DOWN:
-                    pygame.draw.line(self.screen, attack_color, (x, y + 20), (x, y + 70), 5)
+                    pygame.draw.arc(self.screen, attack_color, (x-30, y+10, 60, 40), 3.14, 6.28, 4)
                 elif direction == Direction.LEFT:
-                    pygame.draw.line(self.screen, attack_color, (x - 20, y), (x - 50, y), 5)
+                    pygame.draw.arc(self.screen, attack_color, (x-50, y-20, 40, 40), 1.57, 4.7, 4)
                 elif direction == Direction.RIGHT:
-                    pygame.draw.line(self.screen, attack_color, (x + 20, y), (x + 70, y), 5)
+                    pygame.draw.arc(self.screen, attack_color, (x+10, y-20, 40, 40), 4.7, 1.57, 4)
+    
+    def draw_sound_effects(self):
+        """Draw visual indicators for sound effects"""
+        current_time = time.time()
+        font = pygame.font.Font(None, 24)
+        
+        # Hit sound effect
+        if self.hit_sound_time > 0:
+            elapsed = current_time - self.hit_sound_time
+            if elapsed < 0.1:
+                alpha = int(255 * (1 - elapsed / 0.1))
+                text = font.render("HIT!", True, (255, 100, 100))
+                text.set_alpha(alpha)
+                self.screen.blit(text, (self.screen.get_width() // 2 - 20, 100))
+        
+        # Miss sound effect
+        if self.miss_sound_time > 0:
+            elapsed = current_time - self.miss_sound_time
+            if elapsed < 0.1:
+                alpha = int(255 * (1 - elapsed / 0.1))
+                text = font.render("MISS", True, (150, 150, 150))
+                text.set_alpha(alpha)
+                self.screen.blit(text, (self.screen.get_width() // 2 - 25, 100))
 
     def render_menu(self):
         """Render the start menu with name/IP input and Connect button"""
